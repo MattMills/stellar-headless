@@ -1,3 +1,28 @@
+# stellar-headless
+
+Tooling for running the real Stellaris 4.5.2 Linux build headless, as a reference ("oracle") for a reimplementation: load a save, run exact ticks, dump the gamestate, take the game's own frames, and drive its menus and windows through a line-based command protocol.
+
+It was split out of [stellarstellaris-win](https://github.com/MattMills/stellarstellaris-win)'s `headless/` folder, with its history, and is shared by that repo's Lua simulation and Rust renderer (`stellar-render`), which speak the same protocol. GPLv3, as the parent repo.
+
+**Not included, and not needed to use the tools:** the game, its files, saves, and anything derived from its binary (disassembly, symbol and string dumps, address tables). You need your own copy of Stellaris 4.5.2 for Linux; `setup.sh` prepares a box for it.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `headless.c` | The `LD_PRELOAD` driver: loads, ticks, saves, frames, input, menu and window commands. |
+| `run.sh`, `view.sh`, `newgame.sh`, `standard.sh`, `make_standard.sh`, `setup.sh` | The runners; the rest of this README covers them. |
+| `dev/` | Development helpers: the database dumper, call-site and RNG tracing, gamestate diffs. |
+| `results/` | Measured results the docs cite (determinism runs, draw orders). |
+| `tools/ctl.py`, `tools/pair.py` | Clients of the command protocol. `ctl.py` sends commands and saves frames; `pair.py` runs the same commands against the game and the renderer and writes the pair. Standard library only. |
+| `re/dis.sh`, `re/rs.sh` | Reverse-engineering helpers: disassemble an address range of your binary (`objdump`), or read C strings and floats at addresses (`gdb`). They expect the binary at `/opt/stellaris-headless/game/stellaris`. |
+| `window/winshot.sh` | Drives a windowed program under Xvfb with xdotool clicks (`"x y wait"`, or `"r x y wait"` for a right click) and screenshots each step. Its output directory is guarded (`"${O:?}"`). |
+| `window/wmclose.c` | Sends `WM_DELETE_WINDOW` to a window, as a close button does (`gcc -o wmclose wmclose.c -lX11`). |
+
+Paths in the docs below (`/opt/stellaris-headless`, `/zpool0/share/...`, `10.5.0.24`) are from the original test box; adjust them to yours.
+
+---
+
 # headless: the real Stellaris 4.5.2 as a simulation oracle
 
 The Linux 4.5.2 build runs on a Linux box under Xvfb (Mesa software GL), loads a save through its
