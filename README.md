@@ -54,6 +54,8 @@ on the 24-core box were fine).
 | `dev/standard_events.py` | what happens in a standard: counts per save, countries and wars appearing |
 | `setup.sh` | builds the runtime directory `/opt/stellaris-headless/game` |
 | `view.sh` | the game's own frames, driven by commands over TCP or from a script: reference shots for `sim/render` (view mode, below) |
+| `tools/qa.py` | one scenario on the game and on stellar-render at once: the same commands, each side's replies, times, phase profiles, gamestates compared, script results (QA, below) |
+| `qa/` | scenarios for `tools/qa.py` |
 | `dev/gsdiff.sh` | diff two gamestates with the one known noise line masked |
 | `dev/callsites.py` | the call-site table for the profiler (by caller, or by callee over a full disassembly) |
 | `dev/pcfuncs.py` | a pool-read table's instructions, by function |
@@ -620,6 +622,11 @@ the renderer:
 | `tick N` (`frames N`), `wait SECONDS` | N frames run; SECONDS of frames (with a timestep, that many frames of it) |
 | `state [planet ID]` | JSON: date, view, window, the clock (paused, speed), the input (pointer, buttons and keys held, timestep, frames run, frames held for the input's delivery), the camera (orientation and its smoothing target, eye, look-at, up, FOV, aspect, near, far, the view and projection matrices), the system's zoom steps; with a planet its `CPlanet::CalcCurrentEntityScale`, `GetDisplaySize` and entity world transform |
 | `hover` | the galaxy view's hover state: the system ref cached at idler +0xaa4 (CInGameIdler::GetGalacticObjectUnderMouse, what a right click there orders to), the GUI's pointer for hit tests (CGuiGraphics +0x358), the view and the camera's rotating flag. Replies `ok hover cached REF (index I) ... scale X Y view V rotating R` |
+| `prof on\|off\|reset`, `prof report PATH` | the call-site profile (`HEADLESS_PROFILE=1`: the tick's phases, 2,378 sites): each site's calls, random draws, and inclusive and self time (`ms`, `self_ms`, `ms_per_day` columns); the reply gives the ticks and the time in `HandleTurnTick` a day. Self time is less the instrumented calls under it, on the same thread. The hooks cost: a profiled day ~56-64 ms against ~40 |
+| `gamestate PATH` | the game's own gamestate writer (`SaveGameCheckMakeSave`, as run mode at its end) into the user dir, moved to PATH (CRLF, as the game writes it) |
+| `effect WORDS` | the console's `effect` (`OnExecute_Effect`): a script effect in the player's country's scope; the reply has the handler's time and text |
+| `trigger WORDS` | the console's `test_trigger` (`OnExecute_TestTrigger`): `Trigger returned: TRUE/FALSE`. The handler takes ~420 ms whatever the trigger (the console's own work): not the trigger's cost |
+| `script_profiler ARGS` | the console's `script_profiler` (`OnExecute_ScriptProfiler`), the game's own timing of script |
 | `quit` | `_exit(0)` (no gamestate written) |
 
 **Input** (`headless.c`, "input"; the renderer's side is `sim/render/src/controls.rs`,
@@ -772,6 +779,42 @@ pdx_online_assets tweakergui_assets locales`) came from the Windows install
 `tar | ssh`. Nothing under `/opt/stellaris`, `/opt/stellaris-saves` or the backups is modified.
 `/opt/stellaris-headless`: `game/` (the install), `headless.so`, `work/` (per-run dirs, removed
 after a successful run), `cache/` (Mesa shaders, the profiler's site table).
+
+## QA: the game and stellar-render side by side (`tools/qa.py`)
+
+```
+QA_RENDER=<stellar-render> QA_DIFF=<the sim's examples/diff> python3 tools/qa.py run qa/month.txt /root/qa/month
+python3 tools/qa.py report /root/qa/month     # the report again from the run's records
+```
+
+`qa.py` starts the real game (`view.sh --listen`, with `HEADLESS_PROFILE=1`) and the renderer
+(`stellar-render --listen`, then `load-sim` of the same save) on free ports, each in its own work
+dir, and sends each command of a scenario to both at once (a thread each); the next command waits
+for both replies, so the two run the same sequence in step. A scenario is the protocol's commands
+(`{OUT}` is each side's folder) and a few directives:
+
+| directive | |
+|---|---|
+| `@save PATH` | the save both load (default `autosave_2210.01.01`) |
+| `@game CMD`, `@render CMD` | one side only |
+| `@gamestate NAME` | the game's `gamestate`, the renderer's `save` (the sim's world as a save), then the sim's `examples/diff` of the two at the same date (0 days run: fields equal, the stores that differ most) |
+| `@prof NAME` | the game's `prof report` (the tick's call sites) and the renderer's `simprof report` (the simulation's units: calls, seconds, draws), then both reset |
+| `@mark NAME` | a line in the timeline |
+
+The run's folder: `report.md` (errors, each command's time on both sides, the gamestates
+compared, the script statements' results side by side, the phase profiles side by side, the
+replies that differ), `timeline.tsv`, `states.jsonl`, `run.json` (the machine's load average
+before and after: timings taken next to other work are noted), the two sides' logs, `game/` and
+`render/` (frames, gamestates, profiles).
+
+First results (2026-10-21, 10.5.0.24 with the ABI dump running, load ~33; renderer at
+stellarstellaris-win master + the qa-harness branch):
+
+| scenario | finding |
+|---|---|
+| `qa/smoke.txt`, `qa/month.txt` | a month from `autosave_2210.01.01`: the game 1.2-2.0 s, the renderer's simulation 86-94 s (47-70x). By phase, ms a day (the game's `HandleTurnTick` children with the profiler on; the sim's units by kind): daily 25.0 / 515, micro 25.1 / 479, ai 3.8 / 157, monthly 1.8 / 98. The sim's slowest units: `micro.update` 47 ms a tick, `daily.colonies_serial` 235 ms a day, `ai.process` 155 ms. Its units add up to 37 s of the 93 s the step took: the rest is outside the phases |
+| `qa/month.txt` | the states: 99.5% of fields equal right after the load (the renderer's save of the loaded game against the game's own gamestate: the load and save themselves), 99.3% after the month; country, fleet and ships differ most |
+| `qa/script.txt` | 13 statements (9 triggers, 2 effects, the triggers again after them): the same results on both sides |
 
 ## Options (`run.sh` environment)
 

@@ -1,0 +1,9 @@
+# a month on both sides: the time of each day's phases, and the states compared after it
+@save /opt/stellaris-saves/autosave_2210.01.01.sav
+pause
+@gamestate day0
+prof on
+step 30
+@prof month
+state
+@gamestate month
