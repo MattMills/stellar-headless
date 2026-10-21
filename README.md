@@ -807,13 +807,33 @@ replies that differ), `timeline.tsv`, `states.jsonl`, `run.json` (the machine's 
 before and after: timings taken next to other work are noted), the two sides' logs, `game/` and
 `render/` (frames, gamestates, profiles).
 
-First results (2026-10-21, 10.5.0.24 with the ABI dump running, load ~33; renderer at
-stellarstellaris-win master + the qa-harness branch):
+Results (2026-10-21, 10.5.0.24, a month from `autosave_2210.01.01`, `qa/month.txt`):
+
+| run | the game | the renderer's simulation |
+|---|---:|---:|
+| both at once, load ~2-5 | 0.91 s | 16.5-17.6 s (18-19x) |
+| the renderer alone (`--only render`) | | 12.3 s (~13.5x) |
+| before stellarstellaris-win#114's second commit: a `step` in the window's 1 ms slices, alone | | 33.9 s, of which 15.0 s in the phases |
+| the same, both at once next to a load of ~33 (the ABI dump), the sim pinned to a busy core | 1.2-2.0 s | 86-94 s, of which 37 s in the phases |
+
+Run next to the game, the simulation takes ~35% longer than alone (not the pinning: `STELLAR_PIN=off`
+gives 16.5 s against 17.6), so for its clean time use `--only render`; the game's own time changes
+little. By phase, both at once (ms a day; the game's `HandleTurnTick` children with the profiler on,
+which adds ~40% to the game; the sim's units by kind):
+
+| phase | game | sim | sim / game |
+|---|---:|---:|---:|
+| daily | 12.4 | 264 | 21 |
+| micro | 12.9 | 225 | 17 |
+| ai | 2.2 | 68 | 32 |
+| monthly | 1.1 | 32 | 29 |
+
+The sim's costliest units: `micro.update` 22 ms a tick, `daily.colonies_serial` 106 ms a day,
+`ai.process` 67 ms, `daily.countries_parallel` 64 ms. The phases now account for the whole step.
 
 | scenario | finding |
 |---|---|
-| `qa/smoke.txt`, `qa/month.txt` | a month from `autosave_2210.01.01`: the game 1.2-2.0 s, the renderer's simulation 86-94 s (47-70x). By phase, ms a day (the game's `HandleTurnTick` children with the profiler on; the sim's units by kind): daily 25.0 / 515, micro 25.1 / 479, ai 3.8 / 157, monthly 1.8 / 98. The sim's slowest units: `micro.update` 47 ms a tick, `daily.colonies_serial` 235 ms a day, `ai.process` 155 ms. Its units add up to 37 s of the 93 s the step took: the rest is outside the phases |
-| `qa/month.txt` | the states: 99.5% of fields equal right after the load (the renderer's save of the loaded game against the game's own gamestate: the load and save themselves), 99.3% after the month; country, fleet and ships differ most |
+| `qa/month.txt` | the states: 99.5% of fields equal right after the load (the renderer's save of the loaded game against the game's own gamestate: the load and save themselves), 99.3% after the month; ships, country and fleet differ most |
 | `qa/script.txt` | 13 statements (9 triggers, 2 effects, the triggers again after them): the same results on both sides |
 
 ## Options (`run.sh` environment)
