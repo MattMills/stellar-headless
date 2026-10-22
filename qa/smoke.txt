@@ -1,0 +1,12 @@
+# smoke: both sides load the save, step, and report state and a frame
+@save /opt/stellaris-saves/autosave_2210.01.01.sav
+resize 1600 900
+pause
+state
+@mark one day
+step 1
+state
+@mark a month
+step 30
+state
+frame {OUT}/galaxy.png

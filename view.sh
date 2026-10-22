@@ -43,6 +43,13 @@ TIMEOUT=${HEADLESS_TIMEOUT:-3600}
 [ -f "$SAVE" ] || { echo "no such save: $1" >&2; exit 2; }
 [ -x "$ROOT/game/stellaris" ] || { echo "no game in $ROOT/game (see README: setup)" >&2; exit 2; }
 
+# HEADLESS_PROFILE=1: the default call-site table (the tick's phases; `prof` commands), as run.sh
+if [ "${HEADLESS_PROFILE:-}" = 1 ]; then
+	HEADLESS_PROFILE=$ROOT/cache/sites.tsv
+	[ -s "$HEADLESS_PROFILE" ] || python3 "$HERE/dev/callsites.py" "$ROOT/game/stellaris" "$HEADLESS_PROFILE" >&2
+	export HEADLESS_PROFILE
+fi
+
 SO=$ROOT/headless.so
 if [ ! -f "$SO" ] || [ "$HERE/headless.c" -nt "$SO" ]; then
 	gcc -O2 -Wall -shared -fPIC -o "$SO.tmp" "$HERE/headless.c" -ldl -lpthread && mv "$SO.tmp" "$SO" || exit 2

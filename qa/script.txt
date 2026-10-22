@@ -1,0 +1,17 @@
+# script on both sides: triggers in the player's country's scope, then an effect and its result
+@save /opt/stellaris-saves/autosave_2210.01.01.sav
+pause
+trigger always = yes
+trigger always = no
+trigger is_ai = no
+trigger num_owned_planets > 3
+trigger has_technology = tech_lasers_1
+trigger any_owned_planet = { is_capital = yes }
+trigger count_owned_pop = { count > 10 }
+trigger energy > 1000
+trigger has_country_flag = qa_flag
+effect set_country_flag = qa_flag
+trigger has_country_flag = qa_flag
+effect add_resource = { energy = 1000 }
+trigger energy > 1000
+@gamestate after_effects

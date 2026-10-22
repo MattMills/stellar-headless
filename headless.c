@@ -257,6 +257,7 @@ struct site {
 	int override_mode, override_const, pool_kind; // pool_kind: 1 daily fill, 2 monthly fill
 	int consumer;                                 // the callee takes an `int const*` / `int*`
 	uint64_t calls, draws;
+	uint64_t ns, self_ns;                         // time in the call, and less its instrumented calls
 	uint64_t pool_reads[2], swapped_calls;
 };
 enum { OV_NONE, OV_ZERO, OV_XOR, OV_CONST };
@@ -270,9 +271,19 @@ struct pframe {
 	int site;
 	uint64_t a2, a3; // rdx, rcx at the call
 	int swapped;
+	uint64_t t0, child; // the call's start (ns), and the time of the instrumented calls inside it
 };
 static __thread struct pframe t_frames[256];
 static __thread int t_depth;
+static int g_prof_tick0;        // the total ticks when the profile was last reset (`prof reset`)
+static double g_prof_wall0;     // and the time
+static uint32_t g_prof_pos0;    // and the generator's position
+
+static inline uint64_t mono_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 
 static inline uint32_t rng_pos(void) { return *(volatile uint32_t *)a_Random; }
 static inline uint32_t rng_seed(void) { return *(volatile uint32_t *)(a_Random + 4); }
@@ -349,6 +360,8 @@ void *hk_before(long site, void **retslot, uintptr_t rbp) {
 	f->a2 = regs[-3];
 	f->a3 = regs[-4];
 	f->swapped = 0;
+	f->child = 0;
+	f->t0 = g_prof_on ? mono_ns() : 0;
 	struct site *s = &g_sites[site];
 	if (g_track && g_prof_on) {
 		if (s->pool_kind == 1) {
@@ -411,6 +424,14 @@ void *hk_after(uint64_t *rax_slot) {
 	if (g_prof_on) {
 		__atomic_add_fetch(&s->calls, 1, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&s->draws, (uint32_t)(rng_pos() - f->pos), __ATOMIC_RELAXED);
+		if (f->t0) {
+			// inclusive time, self time (less the instrumented calls under it, on this thread),
+			// and this call's time counted in its caller's frame
+			uint64_t dt = mono_ns() - f->t0;
+			__atomic_add_fetch(&s->ns, dt, __ATOMIC_RELAXED);
+			__atomic_add_fetch(&s->self_ns, dt > f->child ? dt - f->child : 0, __ATOMIC_RELAXED);
+			if (t_depth > 0) t_frames[t_depth - 1].child += dt;
+		}
 		if (s->override_mode) apply_override(f, rax_slot);
 		if (g_track) {
 			if (s->pool_kind == 1) {
@@ -724,14 +745,27 @@ static void profile_write(const char *path, uint64_t total_draws, int ticks) {
 	           "executed between ticks) %llu\n",
 	        (unsigned long long)total_draws, ticks, days ? (double)total_draws / days : 0.0,
 	        (unsigned long long)htt, (unsigned long long)(total_draws - htt));
-	fprintf(f, "site\tcaller\tcallee\tcalls\tdraws\tdraws_per_day\n");
+	fprintf(f, "site\tcaller\tcallee\tcalls\tdraws\tdraws_per_day\tms\tself_ms\tms_per_day\n");
 	for (int i = 0; i < g_nsites; i++) {
 		struct site *s = &g_sites[i];
 		if (!s->calls) continue;
-		fprintf(f, "%lx\t%s\t%s\t%llu\t%llu\t%.1f\n", (unsigned long)(s->addr - g_base), s->caller, s->callee,
-		        (unsigned long long)s->calls, (unsigned long long)s->draws, days ? (double)s->draws / days : 0.0);
+		fprintf(f, "%lx\t%s\t%s\t%llu\t%llu\t%.1f\t%.3f\t%.3f\t%.4f\n", (unsigned long)(s->addr - g_base), s->caller,
+		        s->callee, (unsigned long long)s->calls, (unsigned long long)s->draws,
+		        days ? (double)s->draws / days : 0.0, s->ns / 1e6, s->self_ns / 1e6, days ? s->ns / 1e6 / days : 0.0);
 	}
 	fclose(f);
+}
+
+// `prof reset`: the counts and times back to zero, from the current tick
+static void profile_reset(void) {
+	for (int i = 0; i < g_nsites; i++) {
+		struct site *s = &g_sites[i];
+		s->calls = s->draws = s->ns = s->self_ns = 0;
+	}
+	void *gs = game_state();
+	g_prof_tick0 = gs ? total_ticks(gs) : 0;
+	g_prof_wall0 = now();
+	g_prof_pos0 = rng_pos();
 }
 
 // ---------------------------------------------------------------- DLC ownership
@@ -1468,6 +1502,9 @@ static uintptr_t a_GalacticObjectDb;      // TPdxRef<CGalacticObject>::_pDatabas
 static uintptr_t a_GalaxyScaleMult;       // NDefines::NCamera::GALAXY_SPACE_SCALE_MULT
 static uintptr_t a_SystemScaleMult;       // NDefines::NCamera::SYSTEM_SPACE_SCALE_MULT
 static uintptr_t a_ExecuteObserve;        // OnExecute_Observe(CPdxArray<CString, int> const&)
+static uintptr_t a_ExecuteEffect;         // OnExecute_Effect(CPdxArray<CString, int> const&)
+static uintptr_t a_ExecuteTestTrigger;    // OnExecute_TestTrigger(CPdxArray<CString, int> const&)
+static uintptr_t a_ExecuteScriptProfiler; // OnExecute_ScriptProfiler(CPdxArray<CString, int> const&)
 static uintptr_t a_AddEventWindow;        // CInGameIdler::AddEventWindow(COpenPlayerEvent const*, bool, CMessage const*)
 static uintptr_t a_TechViewShowArea;      // CTechnologyView::Show(ETechArea)
 static uintptr_t a_TechViewOnResearched;  // CTechnologyView::OnResearched(ETechArea)
@@ -1491,6 +1528,9 @@ static struct symreq g_view_syms[] = {
 	{"_ZN8NDefines7NCamera23GALAXY_SPACE_SCALE_MULTE", &a_GalaxyScaleMult},
 	{"_ZN8NDefines7NCamera23SYSTEM_SPACE_SCALE_MULTE", &a_SystemScaleMult},
 	{"_Z17OnExecute_ObserveRK9CPdxArrayI7CStringiE", &a_ExecuteObserve},
+	{"_Z16OnExecute_EffectRK9CPdxArrayI7CStringiE", &a_ExecuteEffect},
+	{"_Z21OnExecute_TestTriggerRK9CPdxArrayI7CStringiE", &a_ExecuteTestTrigger},
+	{"_Z24OnExecute_ScriptProfilerRK9CPdxArrayI7CStringiE", &a_ExecuteScriptProfiler},
 	{"_ZN12CInGameIdler14AddEventWindowEPK16COpenPlayerEventbPK8CMessage", &a_AddEventWindow},
 	{"_ZN15CTechnologyView4ShowE9ETechArea", &a_TechViewShowArea},
 	{"_ZN15CTechnologyView12OnResearchedE9ETechArea", &a_TechViewOnResearched},
@@ -3362,6 +3402,40 @@ static void hover_cmd(void) {
 		I32(idler + 0x48c), U8(idler + 0x484));
 }
 
+// A console command's handler, OnExecute_X(CPdxArray<CString, int> const&), run with the words of
+// `text` as its arguments, as the console splits a line (OnExecute_TestTrigger joins them back with
+// spaces: a script's braces can be anywhere). The array is {vtable, CString *data (+0x8), int
+// capacity (+0x10), int size (+0x14)}, a CString 0x30 bytes; the result is the handler's (as
+// `observe`'s): { bool ok; a string: data +0x18, size +0x20 }. The handler's text goes to `out`;
+// returns ok. The CStrings are left (a few hundred bytes a command).
+static int console_exec(uintptr_t fn, const char *text, char *out, size_t outlen) {
+	char buf[960];
+	snprintf(buf, sizeof buf, "%s", text);
+	char *words[256];
+	int n = 0;
+	for (char *save = NULL, *w = strtok_r(buf, " \t", &save); w && n < 256; w = strtok_r(NULL, " \t", &save))
+		words[n++] = w;
+	uint8_t *data = aligned_alloc(16, ((size_t)(n ? n : 1) * 0x30 + 15) & ~(size_t)15);
+	for (int i = 0; i < n; i++) ((void (*)(void *, const char *))a_CStringCtor)(data + i * 0x30, words[i]);
+	_Alignas(16) uint8_t arr[24];
+	memset(arr, 0, sizeof arr);
+	*(uint8_t **)(arr + 8) = data;
+	*(int *)(arr + 0x10) = n;
+	*(int *)(arr + 0x14) = n;
+	_Alignas(16) uint8_t res[64];
+	memset(res, 0, sizeof res);
+	uint8_t s_ggs = U8(a_g_AllowGlobalGameStateAccess), s_gp = U8(a_g_AllowGetPlayer);
+	U8(a_g_AllowGlobalGameStateAccess) = 1, U8(a_g_AllowGetPlayer) = 1;
+	((void (*)(void *, void *))fn)(res, arr);
+	U8(a_g_AllowGlobalGameStateAccess) = s_ggs, U8(a_g_AllowGetPlayer) = s_gp;
+	const char *t = *(const char **)(res + 0x18);
+	size_t len = *(size_t *)(res + 0x20);
+	snprintf(out, outlen, "%.*s", (int)(len < outlen - 1 ? len : outlen - 1), t ? t : "");
+	for (char *p = out; *p; p++)
+		if (*p == '\n' || *p == '\r' || *p == '\t') *p = ' ';
+	return res[0] != 0;
+}
+
 static void view_command(void *gs) {
 	char verb[64] = "", arg[960] = "";
 	sscanf(C.line, "%63s %959[^\n]", verb, arg);
@@ -3421,6 +3495,65 @@ static void view_command(void *gs) {
 		step_days(gs, days);
 		date_str(gs, date, sizeof date);
 		reply_fmt("ok step %d days in %.1f s to %s", days, now() - t, date);
+	} else if (!strcmp(verb, "prof")) {
+		// prof on|off|reset|report PATH: the call-site profile (HEADLESS_PROFILE's table: the
+		// tick's phases) with each site's calls, draws, and inclusive and self time
+		char what[16] = "", path[900] = "";
+		sscanf(arg, "%15s %899[^\n]", what, path);
+		if (!g_nsites) {
+			reply_fmt("error prof: no call sites (start with HEADLESS_PROFILE=1)");
+		} else if (!strcmp(what, "on")) {
+			if (!g_prof_on) profile_reset();
+			g_prof_on = 1;
+			reply_fmt("ok prof on %d sites", g_nsites);
+		} else if (!strcmp(what, "off")) {
+			g_prof_on = 0;
+			reply_fmt("ok prof off");
+		} else if (!strcmp(what, "reset")) {
+			profile_reset();
+			reply_fmt("ok prof reset");
+		} else if (!strcmp(what, "report") && path[0]) {
+			int ticks = total_ticks(gs) - g_prof_tick0;
+			uint64_t ms = g_site_htt >= 0 ? g_sites[g_site_htt].ns / 1000000 : 0;
+			profile_write(path, rng_pos() - g_prof_pos0, ticks);
+			reply_fmt("ok prof report %s %d ticks %.1f s wall, %llu ms in HandleTurnTick (%.2f ms a day)", path,
+			          ticks, now() - g_prof_wall0, (unsigned long long)ms, ticks ? ms * 10.0 / ticks : 0.0);
+		} else {
+			reply_fmt("error prof on|off|reset|report PATH");
+		}
+	} else if (!strcmp(verb, "effect") || !strcmp(verb, "trigger") || !strcmp(verb, "script_profiler")) {
+		// effect WORDS: the console's `effect` (a script effect in the player's country's scope);
+		// trigger WORDS: its `test_trigger` (the trigger's result and tooltip); script_profiler
+		// ARGS: its script profiler (the game's own timing of script: triggers, effects, events)
+		uintptr_t fn = !strcmp(verb, "effect") ? a_ExecuteEffect
+		               : !strcmp(verb, "trigger") ? a_ExecuteTestTrigger : a_ExecuteScriptProfiler;
+		char out[800];
+		double t = now();
+		int ok = console_exec(fn, arg, out, sizeof out);
+		reply_fmt("%s %s %.3f ms: %s", ok ? "ok" : "error", verb, (now() - t) * 1000, out);
+	} else if (!strcmp(verb, "gamestate")) {
+		// gamestate PATH: the game's own gamestate writer (SaveGameCheckMakeSave, as run mode at
+		// its end) into the user dir, then moved to PATH; CRLF as the game writes it
+		if (!arg[0]) {
+			reply_fmt("error gamestate PATH");
+			return;
+		}
+		_Alignas(16) uint8_t cs[0x30];
+		((void (*)(void *, const char *))a_CStringCtor)(cs, "headless_qa.gamestate");
+		double t = now();
+		uint8_t s_ggs = U8(a_g_AllowGlobalGameStateAccess);
+		U8(a_g_AllowGlobalGameStateAccess) = 1;
+		int ok = ((int (*)(void *))a_SaveGameCheckMakeSave)(cs) & 1;
+		U8(a_g_AllowGlobalGameStateAccess) = s_ggs;
+		char src[1024];
+		snprintf(src, sizeof src, "%s/.local/share/Paradox Interactive/Stellaris/headless_qa.gamestate",
+		         getenv("HOME") ? getenv("HOME") : ".");
+		if (ok) move_file(src, arg);
+		struct stat st;
+		if (ok && stat(arg, &st) == 0)
+			reply_fmt("ok gamestate %s %lld bytes %.2f s date %s", arg, (long long)st.st_size, now() - t, date);
+		else
+			reply_fmt("error gamestate: not written (%d)", ok);
 	} else if (!strcmp(verb, "gui")) {
 		U8(a_g_bNoGUI) = !strcmp(arg, "off");
 		reply_fmt("ok gui %s", U8(a_g_bNoGUI) ? "off" : "on");
